@@ -1,0 +1,147 @@
+# -*- coding: utf-8 -*-
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
+import shap
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from keras.models import Model
+from keras.layers import Input, Dense, Reshape, Conv2D, MaxPooling2D, Flatten, Dropout
+from sklearn.preprocessing import scale
+from tensorflow.keras.utils import to_categorical
+
+# Fixed parameter configuration
+BEST_PARAMS = {
+    'reshape_dim': 8,        # 8x8 feature matrix
+    'conv_kernel': 5,        # 5x5 convolution kernel
+    'conv_stride': 3,        # Convolution stride 3
+    'dense_layers': 2,       # 2 fully connected layers
+    'dense_units': 32,       # 32 units per layer
+    'activation': 'selu'     # SeLU activation function
+}
+
+# Model building function (fix dimension alignment)
+def build_final_model(input_shape, num_classes):
+    inputs = Input(shape=(input_shape,))
+    
+    # Feature engineering layer
+    x = Dense(BEST_PARAMS['reshape_dim']**2, activation=BEST_PARAMS['activation'])(inputs)
+    x = Reshape((BEST_PARAMS['reshape_dim'], BEST_PARAMS['reshape_dim'], 1))(x)
+    
+    # Convolutional layer (ensure output dimension consistency)
+    x = Conv2D(32, 
+              (BEST_PARAMS['conv_kernel'], BEST_PARAMS['conv_kernel']),
+              strides=BEST_PARAMS['conv_stride'],
+              padding='valid',  # Change to valid padding
+              activation=BEST_PARAMS['activation'])(x)
+    
+    # Dynamically calculate pooled dimension
+    pool_size = 2
+    x = MaxPooling2D(pool_size=pool_size)(x)
+    x = Flatten()(x)
+    
+    # Fully connected layers
+    for _ in range(BEST_PARAMS['dense_layers']):
+        x = Dense(BEST_PARAMS['dense_units'], activation=BEST_PARAMS['activation'])(x)
+        x = Dropout(0.3)(x)
+    
+    outputs = Dense(num_classes, activation='sigmoid')(x)  # Use sigmoid for binary classification
+    
+    model = Model(inputs=inputs, outputs=outputs)
+    model.compile(loss='binary_crossentropy',  # Fix to binary classification loss function
+                 optimizer='adam',
+                 metrics=['accuracy'])
+    return model
+
+# Data loading and preprocessing (strict dimension control)
+def load_data(filepath):
+    data_ = pd.read_csv(filepath)
+    data = np.array(data_)[:,1:]  # Assume first column is label, extract features
+    m1, n1 = data.shape
+    
+    # Force alignment to 64-dimensional features, pad with 0
+    target_dim = BEST_PARAMS['reshape_dim']**2  # 64
+    if n1 != target_dim:
+        padded_data = np.zeros((m1, target_dim))
+        padded_data[:, :min(n1, target_dim)] = data[:, :min(n1, target_dim)]
+        data = padded_data
+    
+    # Extract label column by index (assume first column is label)
+    labels = np.array(data_)[:, 0]  # Directly use first column as labels
+    scaled_data = scale(data)
+    return scaled_data, labels
+
+# Load human dataset (ensure file path and format are correct)
+X, y = load_data(r"C:\Users\魏\Desktop\桌面\H. sapiens.csv")
+
+# Build and validate model
+final_model = build_final_model(X.shape[1], 1)  # Binary classification output dimension is 1
+final_model.summary()
+
+# Model training
+history = final_model.fit(
+    X, y,  # Directly use 1D labels
+    epochs=30,
+    batch_size=32,
+    validation_split=0.2,
+    verbose=1
+)
+
+def perform_shap_analysis(model, X_data):
+    # Create background dataset (50 samples)
+    background = X_data[np.random.choice(X_data.shape[0], 50, replace=False)]
+    
+    # Create explainer
+    explainer = shap.DeepExplainer(model, background)
+    
+    # Calculate SHAP values (limit sample size)
+    test_samples = X_data[:990]
+    
+    try:
+        shap_values = explainer.shap_values(test_samples)
+        shap_values = np.array(shap_values)  # Convert to numpy array
+        print(f"Original shape of SHAP values: {shap_values.shape}")
+        
+        # Process 3D SHAP values (n_samples, n_features, 1)
+        if shap_values.ndim == 3 and shap_values.shape[2] == 1:
+            shap_values_positive = shap_values.reshape(shap_values.shape[0], shap_values.shape[1])
+            print(f"Reshaped SHAP values shape: {shap_values_positive.shape}")
+        else:
+            raise ValueError(f"Abnormal SHAP value dimension: {shap_values.shape}")
+            
+    except Exception as e:
+        print(f"SHAP calculation failed: {str(e)}")
+        return
+    
+    # Generate precise feature names
+    real_features = 40  # 2*(21-1)=40 in the paper
+    feature_names = []
+    for i in range(40):
+       if i < 20:
+          feature_names.append(f"FreeEnergy_Amp_{i + 1}")
+       else:
+          feature_names.append(f"Hydrophilicity_Amp_{i - 19}")
+    for i in range(40, 64):
+        feature_names.append(f"Padding_{i - 39}")
+    
+    # Visualization (strict dimension verification)
+    try:
+        plt.figure(figsize=(15, 8),dpi=1000)
+        shap.summary_plot(
+            shap_values_positive,  # Use reshaped SHAP values
+            test_samples,
+            feature_names=feature_names,
+            plot_type="dot",  # Dot plot is clearer
+            max_display=40,    # Only display top 40 real features
+            show=False
+        )
+        plt.title("Global Feature Importance (Positive Class)")
+        plt.show()
+        print("Visualization successful!")
+    except Exception as e:
+        print(f"Visualization failed: {str(e)}")
+
+# Execute revised analysis
+print("\nExecuting revised SHAP analysis...")
+perform_shap_analysis(final_model, X)
